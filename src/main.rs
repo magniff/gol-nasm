@@ -1,16 +1,17 @@
 #![allow(dead_code)]
 
 use std::io::Write;
+use std::num::NonZeroU8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum State {
     Alive,
-    Dead(u8),
+    Dead(NonZeroU8),
 }
 
 impl Default for State {
     fn default() -> Self {
-        State::Dead(0)
+        State::Dead(NonZeroU8::new(1).unwrap())
     }
 }
 
@@ -20,69 +21,133 @@ struct Dimensions {
 }
 
 struct World {
-    current: Vec<Vec<State>>,
-    next: Vec<Vec<State>>,
+    buffer: *mut [State; 2],
     dimensions: Dimensions,
 }
 
+unsafe fn compute_one_step(
+    buffer: *mut [State; 2],
+    width: usize,
+    height: usize,
+    cycle: &mut u8,
+    mut output_buffer: impl std::io::Write,
+) {
+    let total_count = width * height;
+    let position_current = (*cycle & 1) as usize;
+    let position_next = 1 - position_current;
+
+    for index in 0..total_count {
+        let mut alive_neighbours = 0;
+        let current_cell = (*buffer
+            .offset(((total_count + index - width - 1) % total_count) as isize))[position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell = (*buffer.offset(((total_count + index - width) % total_count) as isize))
+            [position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell = (*buffer
+            .offset(((total_count + index - width + 1) % total_count) as isize))[position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell =
+            (*buffer.offset(((total_count + index - 1) % total_count) as isize))[position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell =
+            (*buffer.offset(((total_count + index + 1) % total_count) as isize))[position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell = (*buffer
+            .offset(((total_count + index + width - 1) % total_count) as isize))[position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell = (*buffer.offset(((total_count + index + width) % total_count) as isize))
+            [position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let current_cell = (*buffer
+            .offset(((total_count + index + width + 1) % total_count) as isize))[position_current];
+        if matches!(current_cell, State::Alive) {
+            alive_neighbours += 1;
+        }
+
+        let next_cell =
+            &mut (*buffer.offset(((total_count + index) % total_count) as isize))[position_next];
+
+        *next_cell = match (
+            (*buffer.offset(index as isize))[position_current],
+            alive_neighbours,
+        ) {
+            (State::Alive, 2 | 3) => {
+                write!(output_buffer, "\x1B[48;5;15m ").unwrap();
+                State::Alive
+            }
+            (State::Alive, _) => {
+                write!(output_buffer, "\x1B[48;5;15m ").unwrap();
+                State::Dead(NonZeroU8::new(1).unwrap())
+            }
+            (State::Dead(cycles), 3) => {
+                write!(
+                    output_buffer,
+                    "\x1B[48;2;{red};{green};{blue}m ",
+                    red = (u8::MAX - cycles.get()) / 10,
+                    green = (u8::MAX - cycles.get()) / 10,
+                    blue = u8::MAX - cycles.get(),
+                )
+                .unwrap();
+                State::Alive
+            }
+            (State::Dead(cycles), _) => {
+                write!(
+                    output_buffer,
+                    "\x1B[48;2;{red};{green};{blue}m ",
+                    red = (u8::MAX - cycles.get()) / 10,
+                    green = (u8::MAX - cycles.get()) / 10,
+                    blue = u8::MAX - cycles.get(),
+                )
+                .unwrap();
+                State::Dead(NonZeroU8::new(std::cmp::min(u8::MAX - 1, cycles.get() + 1)).unwrap())
+            }
+        }
+    }
+    *cycle = cycle.wrapping_add(1);
+}
 impl World {
-    pub fn swap_buffers(&mut self) {
-        std::mem::swap(&mut self.current, &mut self.next);
-    }
-
-    pub fn get_from_next_mut(&mut self, x: isize, y: isize) -> &mut State {
-        &mut self.next[y.rem_euclid(self.dimensions.height as isize) as usize]
-            [x.rem_euclid(self.dimensions.width as isize) as usize]
-    }
-
-    pub fn get_from_current(&self, x: isize, y: isize) -> &State {
-        &self.current[y.rem_euclid(self.dimensions.height as isize) as usize]
-            [x.rem_euclid(self.dimensions.width as isize) as usize]
-    }
-
     pub fn from_dimensions(dimensions: Dimensions) -> Self {
-        let mut current = vec![vec![State::default(); dimensions.width]; dimensions.height];
-        for row in current.iter_mut() {
-            for cell in row.iter_mut() {
-                *cell = if rand::random() {
-                    State::Alive
+        let mut buffer = (0..dimensions.height * dimensions.width)
+            .map(|_| {
+                if rand::random() {
+                    [State::Alive, State::Dead(NonZeroU8::new(1).unwrap())]
                 } else {
-                    State::Dead(0)
-                };
-            }
-        }
-        World {
-            current,
-            next: vec![vec![State::default(); dimensions.width]; dimensions.height],
-            dimensions,
-        }
-    }
-
-    pub fn compute_one_step(&mut self) {
-        for y in 0..self.dimensions.height {
-            for x in 0..self.dimensions.width {
-                let mut alive_neighbors = 0;
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        if dx == 0 && dy == 0 {
-                            continue;
-                        }
-                        if *self.get_from_current(x as isize + dx, y as isize + dy) == State::Alive
-                        {
-                            alive_neighbors += 1;
-                        }
-                    }
+                    [
+                        State::Dead(NonZeroU8::new(1).unwrap()),
+                        State::Dead(NonZeroU8::new(1).unwrap()),
+                    ]
                 }
-                *self.get_from_next_mut(x as isize, y as isize) = match (
-                    self.get_from_current(x as isize, y as isize),
-                    alive_neighbors,
-                ) {
-                    (State::Alive, 2 | 3) => State::Alive,
-                    (State::Alive, _) => State::Dead(0),
-                    (State::Dead(_), 3) => State::Alive,
-                    (State::Dead(cycles), _) => State::Dead(std::cmp::min(u8::MAX - 1, cycles + 1)),
-                };
-            }
+            })
+            .collect::<Vec<_>>();
+
+        let buffer_ptr = buffer.as_mut_ptr();
+        std::mem::forget(buffer);
+
+        World {
+            buffer: buffer_ptr,
+            dimensions,
         }
     }
 }
@@ -96,37 +161,25 @@ fn main() {
     let mut size = unsafe { std::mem::zeroed::<TermSize>() };
     unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ.into(), &mut size) };
 
-    let mut world = World::from_dimensions(Dimensions {
+    let world = World::from_dimensions(Dimensions {
         width: size.width as usize,
         height: size.height as usize,
     });
 
     let mut output_lock = std::io::stdout().lock();
-    write!(output_lock, "?25l").unwrap();
+    write!(output_lock, "\x1b[?25l").unwrap();
 
-    loop {
-        world.compute_one_step();
-        for y in 0..world.dimensions.height {
-            for x in 0..world.dimensions.width {
-                let current = world.get_from_current(x as isize, y as isize);
-                match current {
-                    State::Alive => {
-                        write!(output_lock, "\x1B[48;5;15m ").unwrap();
-                    }
-                    State::Dead(cycles) => {
-                        write!(
-                            output_lock,
-                            "\x1B[48;2;{red};{green};{blue}m ",
-                            red = (u8::MAX - cycles) / 10,
-                            green = (u8::MAX - cycles) / 10,
-                            blue = u8::MAX - cycles,
-                        )
-                        .unwrap();
-                    }
-                }
-            }
+    let mut cycles = 0u8;
+    unsafe {
+        loop {
+            compute_one_step(
+                world.buffer,
+                world.dimensions.width,
+                world.dimensions.height,
+                &mut cycles,
+                &mut output_lock,
+            );
+            write!(output_lock, "\x1b[1;1H").unwrap();
         }
-        write!(output_lock, "\x1b[1;1H").unwrap();
-        world.swap_buffers();
     }
 }
